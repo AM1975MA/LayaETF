@@ -56,7 +56,9 @@ def main():
     ap.add_argument('--labels',default='data/pilot_labels.csv')
     ap.add_argument('--variant',choices=['noul_neutral','choice'],required=True)
     ap.add_argument('--model',default='convaiinnovations/laya')
-    ap.add_argument('--batch-size',type=int,default=8)
+    ap.add_argument('--batch-size',type=int,default=4)
+    ap.add_argument('--max-len',type=int,default=1024)
+    ap.add_argument('--head-max-len',type=int,default=192)
     ap.add_argument('--outdir',default='results')
     a=ap.parse_args()
     import laya
@@ -68,13 +70,16 @@ def main():
     t0=time.perf_counter(); agent=laya.load(a.model,device='cpu'); load_s=time.perf_counter()-t0
     t1=time.perf_counter()
     if hasattr(agent,'predict_batch'):
-        results=agent.predict_batch(states,qs,batch_size=a.batch_size,sort_by_length=True)
+        results=agent.predict_batch(
+            states,qs,batch_size=a.batch_size,sort_by_length=True,
+            max_len=a.max_len,head_max_len=a.head_max_len,
+        )
     else:
-        results=[agent.predict(s,qs) for s in states]
+        results=[agent.predict(s,qs,max_len=a.max_len,head_max_len=a.head_max_len) for s in states]
     infer_s=time.perf_counter()-t1
     pred=pd.DataFrame({'case_id':ids,'p_A':[p_a(r,a.variant) for r in results]})
     lab=pd.read_csv(a.labels)
-    z=lab.merge(pred,on='case_id',validate='one_to_one')
+    z=lab.merge(pred,on='case_id',how='inner',validate='one_to_one')
     o=z[z.orientation.eq('original')].copy(); y=o.a_wins.astype(int).to_numpy(); p=o.p_A.to_numpy(float)
     m={
         'variant':a.variant,'model':a.model,'n_original':int(len(o)),'n_requests':int(len(z)),
@@ -84,6 +89,7 @@ def main():
         'auc':float(roc_auc_score(y,p)) if len(np.unique(y))>1 else None,
         'mean_p_A':float(p.mean()),'empirical_A_win_rate':float(y.mean()),
         'model_load_s':load_s,'inference_s':infer_s,'requests_per_s':float(len(z)/infer_s),
+        'max_len':a.max_len,'head_max_len':a.head_max_len,
     }
     m['ece10'],cal=ece(y,p)
     piv=z.pivot(index='pair_id',columns='orientation',values='p_A').dropna()
