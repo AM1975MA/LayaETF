@@ -1,0 +1,115 @@
+name: Laya ETF independent candidate probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/laya-independent.yml'
+      - 'run_laya_independent.py'
+      - 'requirements.txt'
+      - 'data/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_XET: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: laya-hf-${{ runner.os }}-0.3.15-english
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install -r requirements.txt
+
+      - name: Rehydrate and validate anonymized requests
+        shell: bash
+        run: |
+          cat data/req70.b64.part* | tr -d '\n' | base64 --decode > /tmp/requests.gz
+          gzip -dc /tmp/requests.gz > data/pilot_requests.jsonl || true
+          python - <<'PY'
+          import csv, json
+          from pathlib import Path
+          rp=Path('data/pilot_requests.jsonl')
+          rows=[json.loads(x) for x in rp.read_text().splitlines() if x.strip()]
+          assert len(rows)==140, len(rows)
+          originals=[x for x in rows if x['case_id'].endswith('-o')]
+          assert len(originals)==70, len(originals)
+          with open('data/pilot_labels_70.csv', newline='') as f:
+              labels=list(csv.DictReader(f))
+          assert len(labels)==140, len(labels)
+          orig_ids={x['case_id'] for x in originals}
+          label_ids={x['case_id'] for x in labels if x['orientation']=='original'}
+          assert orig_ids==label_ids
+          raw=rp.read_text()
+          for banned in ('ticker','signal_date','fwd_ret','ret_A','ret_B'):
+              assert banned not in raw, banned
+          print(f'validated requests={len(rows)} originals={len(originals)} labels={len(labels)}')
+          PY
+
+      - name: Run independent candidate probe
+        run: |
+          python run_laya_independent.py --batch-size 4
+
+      - name: Build job summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          out=Path(os.environ['GITHUB_STEP_SUMMARY'])
+          p=Path('results_independent/summary.json')
+          lines=['# Laya independent-candidate probe','']
+          if not p.exists():
+              lines += ['No summary produced.']
+          else:
+              s=json.loads(p.read_text())
+              lines += [f"- Single-candidate states: **{s['n_single_candidates']}**", '']
+              for name,m in s['variants'].items():
+                  lines += [
+                      f'## {name}', '',
+                      f"- N pairs: **{m['n_pairs']}**",
+                      f"- Accuracy: **{m['accuracy']:.4f}**",
+                      f"- AUC: **{m['auc']:.4f}**" if m['auc'] is not None else '- AUC: n/a',
+                      f"- Brier: **{m['brier']:.4f}**",
+                      f"- Log loss: **{m['log_loss']:.4f}**",
+                      f"- ECE10: **{m['ece10']:.4f}**",
+                      f"- Fraction choosing original A: **{m['fraction_choose_A']:.4f}**",
+                      f"- Exact ties: **{m['fraction_exact_tie']:.4f}**",
+                      ''
+                  ]
+          out.write_text('\n'.join(lines)+'\n')
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laya-etf-independent-${{ github.run_id }}
+          path: results_independent/
+          if-no-files-found: warn
+          retention-days: 30
