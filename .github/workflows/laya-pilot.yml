@@ -51,7 +51,7 @@ jobs:
           cat data/req70.b64.part* | tr -d '\n' | base64 --decode > /tmp/requests.gz
           gzip -dc /tmp/requests.gz > data/pilot_requests.jsonl || true
           tr -d '\n' < data/pilot_labels.csv.gz.b64 | base64 --decode > /tmp/labels.gz
-          gzip -dc /tmp/labels.gz > data/pilot_labels.csv
+          gzip -dc /tmp/labels.gz > data/pilot_labels.csv || true
           python - <<'PY'
           import csv, json
           from pathlib import Path
