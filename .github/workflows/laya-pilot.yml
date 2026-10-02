@@ -50,8 +50,6 @@ jobs:
         run: |
           cat data/req70.b64.part* | tr -d '\n' | base64 --decode > /tmp/requests.gz
           gzip -dc /tmp/requests.gz > data/pilot_requests.jsonl || true
-          tr -d '\n' < data/pilot_labels.csv.gz.b64 | base64 --decode > /tmp/labels.gz
-          gzip -dc /tmp/labels.gz > data/pilot_labels.csv || true
           python - <<'PY'
           import csv, json
           from pathlib import Path
@@ -65,13 +63,14 @@ jobs:
           assert len(rows)==140, len(rows)
           with open('data/pilot_labels.csv',newline='') as f:
               labels=list(csv.DictReader(f))
-          assert len(labels)>=140, len(labels)
+          assert len(labels)==140, len(labels)
           label_ids={x['case_id'] for x in labels}
-          assert all(x['case_id'] in label_ids for x in rows)
+          request_ids={x['case_id'] for x in rows}
+          assert request_ids==label_ids, (len(request_ids-label_ids),len(label_ids-request_ids))
           banned=('ticker','signal_date','fwd_ret','ret_A','ret_B')
           raw=rp.read_text()
           assert not any(k in raw for k in banned)
-          print(f'validated_requests={len(rows)} labels={len(labels)}')
+          print(f'validated_requests={len(rows)} labels={len(labels)} exact_id_match=true')
           PY
 
       - name: Run neutral NOUL probe
