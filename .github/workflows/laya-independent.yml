@@ -58,7 +58,7 @@ jobs:
           assert len(rows)==140, len(rows)
           originals=[x for x in rows if x['case_id'].endswith('-o')]
           assert len(originals)==70, len(originals)
-          with open('data/pilot_labels_70.csv', newline='') as f:
+          with open('data/pilot_labels.csv', newline='') as f:
               labels=list(csv.DictReader(f))
           assert len(labels)==140, len(labels)
           orig_ids={x['case_id'] for x in originals}
@@ -72,7 +72,7 @@ jobs:
 
       - name: Run independent candidate probe
         run: |
-          python run_laya_independent.py --batch-size 4
+          python run_laya_independent.py --batch-size 4 --labels data/pilot_labels.csv
 
       - name: Build job summary
         if: always()
