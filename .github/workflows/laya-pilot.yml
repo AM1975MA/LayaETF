@@ -1,0 +1,104 @@
+name: Laya ETF pilot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/laya-pilot.yml'
+      - 'run_laya_actions.py'
+      - 'requirements.txt'
+      - 'data/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_XET: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: laya-hf-${{ runner.os }}-0.3.15-english
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install -r requirements.txt
+
+      - name: Rehydrate anonymized pilot data
+        shell: bash
+        run: |
+          cat data/req70.b64.part* | tr -d '\n' | base64 --decode | gzip -dc > data/pilot_requests.jsonl
+          tr -d '\n' < data/pilot_labels.csv.gz.b64 | base64 --decode | gzip -dc > data/pilot_labels.csv
+          echo "requests=$(wc -l < data/pilot_requests.jsonl)"
+          echo "labels=$(($(wc -l < data/pilot_labels.csv)-1))"
+          test "$(wc -l < data/pilot_requests.jsonl)" -eq 140
+
+      - name: Run neutral NOUL probe
+        run: |
+          python run_laya_actions.py --variant noul_neutral --batch-size 4
+
+      - name: Run choice probe
+        run: |
+          python run_laya_actions.py --variant choice --batch-size 4
+
+      - name: Build job summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          out = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          lines = ['# Laya ETF pilot results', '']
+          for variant in ['noul_neutral', 'choice']:
+              p = Path('results') / f'report_{variant}.json'
+              if not p.exists():
+                  lines += [f'## {variant}', '', 'No report produced.', '']
+                  continue
+              r = json.loads(p.read_text())
+              m = r['metrics']
+              lines += [
+                  f'## {variant}', '',
+                  f"- N independent pairs: **{m['n_original']}**",
+                  f"- Accuracy: **{m['accuracy']:.4f}**",
+                  f"- Brier: **{m['brier']:.4f}**",
+                  f"- Log loss: **{m['log_loss']:.4f}**",
+                  f"- AUC: **{m['auc']:.4f}**" if m['auc'] is not None else '- AUC: n/a',
+                  f"- ECE10: **{m['ece10']:.4f}**",
+                  f"- Swap symmetry MAE: **{m['swap_symmetry_mae']:.4f}**",
+                  f"- Swap symmetry p95: **{m['swap_symmetry_p95']:.4f}**",
+                  f"- Requests/s: **{m['requests_per_s']:.2f}**",
+                  ''
+              ]
+          out.write_text('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laya-etf-pilot-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
