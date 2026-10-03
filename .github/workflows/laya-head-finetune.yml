@@ -47,9 +47,10 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Rehydrate anonymized development data
         run: |
+          set -euo pipefail
           rm -f data/finetune/dev_20*.csv
-          for f in data/finetune/*.csv.b64; do
-            base64 -d "$f" | gzip -dc > "${f%.b64}"
+          for stem in dev_2017_2018 dev_2019_2020 dev_2021_2022; do
+            cat data/finetune/chunks/${stem}.b64.* | base64 -d | gzip -dc > data/finetune/${stem}.csv
           done
       - name: Validate anonymized development data and hashes
         run: |
@@ -81,8 +82,10 @@ jobs:
           assert not any(x in raw for x in banned), raw
           assert d.case_id.is_unique
           assert set(d.label.unique()).issubset({0,1})
-          assert (d.exit_year <= d.year).all()
-          print(d.groupby('year').agg(n=('case_id','size'),win=('label','mean')).to_string())
+          # A 21d outcome can mature in the same calendar year or the next one.
+          # The runner separately enforces exit_year < fold for calibration data.
+          assert ((d.exit_year >= d.year) & (d.exit_year <= d.year + 1)).all()
+          print(d.groupby('year').agg(n=('case_id','size'),win=('label','mean'),exit_min=('exit_year','min'),exit_max=('exit_year','max')).to_string())
           PY
       - name: Fine-tune Laya decision head walk-forward fold ${{ matrix.fold }}
         run: |
