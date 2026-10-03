@@ -1,0 +1,114 @@
+name: Laya ETF head fine-tune pilot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/laya-head-finetune.yml'
+      - 'run_head_finetune.py'
+      - 'aggregate_head_results.py'
+      - 'requirements.txt'
+      - 'data/finetune/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fold:
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        fold: [2020, 2021, 2022]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_XET: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Cache Laya checkpoint
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: laya-hf-${{ runner.os }}-0.3.15-english
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install -r requirements.txt
+      - name: Rehydrate anonymized development data
+        run: |
+          for f in data/finetune/*.csv.gz; do gzip -dc "$f" > "${f%.gz}"; done
+      - name: Validate anonymized development data
+        run: |
+          python - <<'PY'
+          import pandas as pd, glob
+          fs=sorted(glob.glob('data/finetune/dev_20*.csv'))
+          assert len(fs)==3,fs
+          d=pd.concat([pd.read_csv(x) for x in fs],ignore_index=True)
+          assert set(d.year)==set(range(2017,2023))
+          assert len(d)==600
+          banned=('ticker','signal_date','ret_A','ret_B','fwd_ret')
+          raw=' '.join(d.columns).lower()
+          assert not any(x.lower() in raw for x in banned)
+          assert d.case_id.is_unique
+          print(d.groupby('year').agg(n=('case_id','size'),win=('label','mean')).to_string())
+          PY
+      - name: Fine-tune Laya decision head walk-forward fold ${{ matrix.fold }}
+        run: |
+          python run_head_finetune.py --fold ${{ matrix.fold }} --epochs 1 --batch-size 4
+      - name: Upload fold result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laya-head-fold-${{ matrix.fold }}-${{ github.run_id }}
+          path: results_head/fold_${{ matrix.fold }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+  aggregate:
+    needs: fold
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install aggregate deps
+        run: pip install numpy
+      - name: Download fold artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: laya-head-fold-*-${{ github.run_id }}
+          path: collected
+          merge-multiple: false
+      - name: Aggregate metrics
+        run: python aggregate_head_results.py
+      - name: Job summary
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          s=json.load(open('aggregate/summary.json'))
+          out=Path(os.environ['GITHUB_STEP_SUMMARY'])
+          lines=['# Laya ETF head fine-tune pilot','',f"Folds: {s['folds']}",'']
+          for m,v in s['models'].items():
+              lines += [f'## {m}',f"- Accuracy: **{v['accuracy']:.4f}**",f"- AUC: **{v['auc']:.4f}**",f"- Brier: **{v['brier']:.4f}**",f"- ECE10: **{v['ece10']:.4f}**",'']
+          lines += [f"Hybrid24 top1 accuracy: **{s['hybrid24_top1_accuracy']:.4f}**",'',f"Pre-registered signal gate: **{'PASS' if s['pre_registered_signal_gate'] else 'FAIL'}**"]
+          out.write_text('\n'.join(lines)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: laya-head-aggregate-${{ github.run_id }}
+          path: aggregate/
+          retention-days: 30
