@@ -1,0 +1,72 @@
+name: Laya ETF head smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/laya-head-smoke.yml'
+      - 'run_head_smoke.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HUB_DISABLE_XET: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: laya-hf-${{ runner.os }}-0.3.15-english
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install -r requirements.txt
+      - name: Rehydrate 70-pair requests
+        run: |
+          cat data/req70.b64.part* | tr -d '\n' | base64 --decode > /tmp/requests.gz
+          gzip -dc /tmp/requests.gz > data/pilot_requests.jsonl
+          python - <<'PY'
+          import json
+          x=[json.loads(z) for z in open('data/pilot_requests.jsonl')]
+          assert len(x)==140
+          print('validated requests:',len(x))
+          PY
+      - name: Fine-tune frozen-encoder Laya decision head
+        run: python run_head_smoke.py
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path('results_smoke/report.json')
+          if not p.exists(): raise SystemExit('no report')
+          r=json.loads(p.read_text())
+          lines=['# Laya decision-head smoke','',r['protocol'],'']
+          for k in ['zero_shot','head_finetuned','logistic']:
+              m=r[k]; lines += [f'## {k}',f"- accuracy: **{m['accuracy']:.4f}**",f"- AUC: **{m['auc']:.4f}**",f"- Brier: **{m['brier']:.4f}**",f"- log loss: **{m['log_loss']:.4f}**",'']
+          lines += [f"Temperature: **{r['temperature']:.3f}**",f"Head train seconds: **{r['head_train_s']:.1f}**"]
+          Path(os.environ['GITHUB_STEP_SUMMARY']).write_text('\n'.join(lines)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: laya-head-smoke-${{ github.run_id }}
+          path: results_smoke/
+          if-no-files-found: warn
+          retention-days: 30
