@@ -47,20 +47,41 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Rehydrate anonymized development data
         run: |
-          for f in data/finetune/*.csv.gz; do gzip -dc "$f" > "${f%.gz}"; done
-      - name: Validate anonymized development data
+          rm -f data/finetune/dev_20*.csv
+          for f in data/finetune/*.csv.b64; do
+            base64 -d "$f" | gzip -dc > "${f%.b64}"
+          done
+      - name: Validate anonymized development data and hashes
         run: |
           python - <<'PY'
-          import pandas as pd, glob
-          fs=sorted(glob.glob('data/finetune/dev_20*.csv'))
-          assert len(fs)==3,fs
-          d=pd.concat([pd.read_csv(x) for x in fs],ignore_index=True)
-          assert set(d.year)==set(range(2017,2023))
-          assert len(d)==600
-          banned=('ticker','signal_date','ret_A','ret_B','fwd_ret')
+          import hashlib
+          from pathlib import Path
+          import pandas as pd
+
+          expected = {
+              'data/finetune/dev_2017_2018.csv': 'f1d78a7151197d1b071e8e1b659387a9167c757b5ed5d33d19e5c29e6a1dcb27',
+              'data/finetune/dev_2019_2020.csv': '1a0d0b8e05d94aef742b5dcb9282b644d04033f137c734644b9750712c8aacad',
+              'data/finetune/dev_2021_2022.csv': '428fa7c45e4440c9ab1423da90eb3b90acac4b1f68f88ad965b419dc4415cf02',
+          }
+          frames=[]
+          for fn,want in expected.items():
+              p=Path(fn)
+              assert p.exists(), fn
+              got=hashlib.sha256(p.read_bytes()).hexdigest()
+              assert got == want, (fn, got, want)
+              q=pd.read_csv(p)
+              frames.append(q)
+              print(fn, got, len(q))
+          d=pd.concat(frames,ignore_index=True)
+          assert set(d.year)==set(range(2017,2023)), sorted(d.year.unique())
+          assert len(d)==600, len(d)
+          assert d.groupby('year').size().eq(100).all()
+          banned=('ticker','signal_date','fwd_ret','ret_a','ret_b')
           raw=' '.join(d.columns).lower()
-          assert not any(x.lower() in raw for x in banned)
+          assert not any(x in raw for x in banned), raw
           assert d.case_id.is_unique
+          assert set(d.label.unique()).issubset({0,1})
+          assert (d.exit_year <= d.year).all()
           print(d.groupby('year').agg(n=('case_id','size'),win=('label','mean')).to_string())
           PY
       - name: Fine-tune Laya decision head walk-forward fold ${{ matrix.fold }}
